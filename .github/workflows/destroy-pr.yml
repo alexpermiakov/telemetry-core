@@ -1,0 +1,68 @@
+name: Destroy PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to destroy resources for'
+        required: true
+        type: number
+  pull_request:
+    types: [closed]
+
+jobs:
+  destroy:
+    name: Destroy PR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_VAR_environment: "development"
+      TF_VAR_region: "eu-central-1"
+      TF_VAR_pr_number: ${{ inputs.pr_number || github.event.number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.2
+          terraform_wrapper: false
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        id: oidc
+        with:
+          role-to-assume: arn:aws:iam::746669194690:role/TerraformExecutionRole
+          aws-region: eu-central-1
+          audience: sts.amazonaws.com 
+
+      - name: Terraform Init (Prepare for Destroy)
+        working-directory: src/entry
+        run: |
+          terraform init \
+            -backend-config="region=eu-central-1" \
+            -backend-config="bucket=terraform-state-telemetry-core-dev" \
+            -backend-config="key=pr-${{ inputs.pr_number || github.event.number }}/state.tfstate" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Destroy
+        working-directory: src/entry
+        run: terraform destroy -auto-approve
+      
+      - name: Cleanup Remaining Resources
+        working-directory: src/entry
+        run: |
+          PR_NUMBER=${{ inputs.pr_number || github.event.number }}
+          FUNCTIONS=$(aws lambda list-functions --query "Functions[*].FunctionName" --output text)
+
+          aws logs describe-log-groups --query "logGroups[*].logGroupName" --output text | tr '\t' '\n' | while read log_group; do
+            if [[ "$log_group" == */aws/lambda/*-development-$PR_NUMBER ]]; then
+              echo "Deleting log group: $log_group"
+              aws logs delete-log-group --log-group-name "$log_group"
+            fi
+          done
+
+          aws logs delete-log-group --log-group-name "/aws/apigateway/welcome"

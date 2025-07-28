@@ -1,0 +1,96 @@
+name: Provision Pull Request
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  provision:
+    name: Provision Pull Request
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    if: github.event_name == 'pull_request'
+    env:
+      TF_VAR_environment: "development"
+      TF_VAR_region: eu-central-1
+      TF_VAR_pr_number: ${{ github.event.number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.2
+          terraform_wrapper: false
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        id: oidc
+        with:
+          role-to-assume: arn:aws:iam::746669194690:role/TerraformExecutionRole
+          aws-region: eu-central-1
+          audience: sts.amazonaws.com 
+
+      - name: Terraform Init
+        id: init
+        working-directory: src/entry
+        run: |
+          terraform init \
+            -backend-config="region=eu-central-1" \
+            -backend-config="bucket=terraform-state-telemetry-core-dev" \
+            -backend-config="key=pr-${{ github.event.number }}/state.tfstate" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: src/entry
+        run: terraform plan -out=tfplan.bin
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: src/entry
+        continue-on-error: true
+        run: |
+          terraform apply -auto-approve tfplan.bin || true
+          terraform refresh
+          terraform output -json > outputs.json || echo "{}" > outputs.json
+
+      - name: Terraform Destroy on Failure
+        if: steps.apply.outcome == 'failure'
+        working-directory: src/entry
+        run: |
+          echo "Terraform apply failed. Starting destroy to clean up."
+          terraform destroy -auto-approve
+
+      - name: Update Pull Request
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const outputs = JSON.parse(fs.readFileSync('src/entry/outputs.json', 'utf8'));
+            let comment = '## Terraform Outputs\n\n';
+            
+            for (const [key, value] of Object.entries(outputs)) {
+              if( typeof value.value === 'object') {
+                for (const [nestedKey, nestedValue] of Object.entries(value.value)) {
+                  comment += `- ${nestedKey}: \`${nestedValue}\`\n`;
+                }
+              } else {
+                comment += `- ${key}: \`${value.value}\`\n`;
+              }
+            }
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

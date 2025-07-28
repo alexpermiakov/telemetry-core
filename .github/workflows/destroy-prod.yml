@@ -1,0 +1,46 @@
+name: Destroy Production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  destroy:
+    name: Destroy Production
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_VAR_environment: "production"
+      TF_VAR_region: "eu-central-1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.2
+          terraform_wrapper: false
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        id: oidc
+        with:
+          role-to-assume: arn:aws:iam::585008076441:role/TerraformExecutionRole
+          aws-region: eu-central-1
+          audience: sts.amazonaws.com 
+
+      - name: Terraform Init (Prepare for Destroy)
+        working-directory: src/entry
+        run: |
+          terraform init \
+            -backend-config="region=eu-central-1" \
+            -backend-config="bucket=terraform-state-telemetry-core-prod" \
+            -backend-config="key=state.tfstate" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Destroy
+        working-directory: src/entry
+        run: terraform destroy -auto-approve
